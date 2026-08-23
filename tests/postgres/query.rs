@@ -2590,3 +2590,106 @@ fn test_pgvector_select() {
         r#"SELECT "character" FROM "character" WHERE "character" = '[1,2]'"#
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: bounded window frame offsets must be separated from the keyword.
+//
+// Frame::Preceding(n) / Frame::Following(n) previously emitted the offset and
+// the keyword with nothing between them - "31PRECEDING" inline, "$1PRECEDING"
+// bound - and PostgreSQL rejects both with
+//
+//     ERROR:  trailing junk after parameter at or near "$1PRECEDING"
+//
+// It survived because these two variants had no test and no doc example: every
+// example used UnboundedPreceding / UnboundedFollowing / CurrentRow, each of
+// which writes a complete, correctly spaced string of its own and so cannot
+// reach the offending branch.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn window_frame_preceding_offset_is_separated() {
+    assert_eq!(
+        Query::select()
+            .from(Char::Table)
+            .expr(
+                Expr::col(Char::Character)
+                    .max()
+                    .over(
+                        WindowStatement::partition_by(Char::FontSize)
+                            .frame(FrameType::Rows, Frame::Preceding(31), Some(Frame::Preceding(1)))
+                            .to_owned()
+                    )
+                    .alias("C"),
+            )
+            .to_string(PostgresQueryBuilder),
+        r#"SELECT MAX("character") OVER ( PARTITION BY "font_size" ROWS BETWEEN 31 PRECEDING AND 1 PRECEDING ) AS "C" FROM "character""#
+    );
+}
+
+#[test]
+fn window_frame_following_offset_is_separated() {
+    assert_eq!(
+        Query::select()
+            .from(Char::Table)
+            .expr(
+                Expr::col(Char::Character)
+                    .max()
+                    .over(
+                        WindowStatement::partition_by(Char::FontSize)
+                            .frame(FrameType::Range, Frame::Preceding(1), Some(Frame::Following(1)))
+                            .to_owned()
+                    )
+                    .alias("C"),
+            )
+            .to_string(PostgresQueryBuilder),
+        r#"SELECT MAX("character") OVER ( PARTITION BY "font_size" RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING ) AS "C" FROM "character""#
+    );
+}
+
+#[test]
+fn window_frame_start_only_offset_is_separated() {
+    assert_eq!(
+        Query::select()
+            .from(Char::Table)
+            .expr(
+                Expr::col(Char::Character)
+                    .max()
+                    .over(
+                        WindowStatement::partition_by(Char::FontSize)
+                            .frame_start(FrameType::Rows, Frame::Preceding(5))
+                            .to_owned()
+                    )
+                    .alias("C"),
+            )
+            .to_string(PostgresQueryBuilder),
+        r#"SELECT MAX("character") OVER ( PARTITION BY "font_size" ROWS 5 PRECEDING ) AS "C" FROM "character""#
+    );
+}
+
+/// The PARAMETERISED path formats separately from the inline one, so it needs
+/// its own assertion: this is the form that actually reached PostgreSQL and
+/// failed.
+#[test]
+fn window_frame_offset_is_separated_when_bound() {
+    let (sql, _values) = Query::select()
+        .from(Char::Table)
+        .expr(
+            Expr::col(Char::Character)
+                .max()
+                .over(
+                    WindowStatement::partition_by(Char::FontSize)
+                        .frame(FrameType::Rows, Frame::Preceding(31), Some(Frame::Preceding(1)))
+                        .to_owned()
+                )
+                .alias("C"),
+        )
+        .to_owned()
+        .build(PostgresQueryBuilder);
+
+    // The offsets BIND, so the assertion is about the placeholders, not the
+    // literals - $1PRECEDING is exactly what PostgreSQL rejected.
+    assert!(
+        sql.contains("ROWS BETWEEN $1 PRECEDING AND $2 PRECEDING"),
+        "frame offsets not separated from keywords: {sql}"
+    );
+}
